@@ -1,0 +1,54 @@
+❯ i want to publish a research paper like A* type . thats why my first step is to choose a topic . i choose reducing latency in rag this topic. now my next task is to dowload recent a* type paper from online and analyse them and finding research gap in each of those paper. here i give you chats with ai @chat.md understand this chat first and first task is to dowload those paper folder wise i mean category wise. as my plan is to do research using my local setup so i need to doload those paper first .
+
+Done. 22 of 23 papers from your chat.md are downloaded into /home/tasnia/jev_research/papers/, organized by category:
+
+- 01_prefill_kv_cache_reuse/ (8 papers) — FusionRAGCache, SpecCache, TurboRAG, PCR, AdaptiveKVCacheReuse, CoinRAG, CacheBlend, RAGCache
+- 02_prefetch_pipelining/ (5 papers) — PredictivePrefetchingRAG, TeleRAG, HedraRAG, RAGO, VoiceAgentRAG
+- 03_context_compression/ (4 papers) — REFRAG, CORE-RAG, ACC-RAG, ECoRAG
+- 04_visual_document_retrieval/ (3 papers) — HierarchicalPatchCompression_ColPali, DocPC, PULSAR
+- 05_background_surveys/ (2 papers) — RAG_Survey, AgenticRAG_Survey
+
+Only A2C-RAG is missing — it's locked behind an ACM DOI with no open arXiv/preprint version I could find. Two links in the original chat (RAGO, RAGCache) had gone stale/paywalled, so I found their actual open-access arXiv versions and pulled those instead.
+
+Next step would be reading each paper and extracting its stated limitations/future-work section to start building the research-gap matrix — want me to go ahead and do that per-paper analysis into research_gap.md?
+
+
+
+
+---
+
+
+❯ now next task is to read and understand and findout research gap . i think we can do it folderwise
+
+research_gap.md is complete — 357 lines covering all 22 papers across the 5 folders, each with core idea, reported results, stated limitations, inferred research gap, and local-setup feasibility, plus cross-cutting gap sections per folder and an overall synthesis at the top.
+
+Bottom line: the biggest unfilled gap across the whole literature is that no paper stacks a learned/predictive layer with a systems-level layer (seen independently in KV-caching, prefetching, and compression), and almost nothing is validated on a single-GPU, small-model, real-local-generation setup like yours. I ranked four concrete fusion directions by feasibility — compress-then-cache (ECoRAG/ACC-RAG + CacheBlend/CacheTune) and lookahead-prefetch + selective-recompute (TeleRAG + CacheBlend/SpecCache) are the strongest fits since all four building blocks are open-source and already validated on single consumer GPUs.
+
+Want to pick one of these four directions now so we can scope the actual method and experiment plan, or do you want to read through research_gap.md yourself first?
+
+✻ Sautéed for 8m 21s · done 5:13 PM
+
+※ recap: You're building a RAG-latency research paper; I downloaded 22 papers and wrote research_gap.md with per-paper gaps and 4 fusion directions. Next: pick one direction (compress-then-cache or prefetch+selective-recompute are strongest) to scope your method. (disable recaps in /config)
+
+
+---
+
+
+
+❯ my next plan to make a proposal to my supervisor . you can give me based on your analysis and recommendations. here i give a sample @proposals/sample/MicroFin_XAI_Project_Proposal_updates.docx
+
+
+Your proposal is ready at proposals/draft/PACER_Project_Proposal.docx.
+
+PACER — Predictive, Adaptive Compression-and-Caching for Low-Latency RAG on Local, Open-Source LLMs — follows your sample's structure (20 sections: executive summary → problem statement → literature positioning table → theoretical framework → RQs/hypotheses → architecture → modules → baselines → ablation design → risk register → stats plan → reproducibility → timeline → publication strategy).
+
+The core pitch, straight from our research_gap.md analysis:
+- The gap: across 22 papers, no one combines a learned predictive signal (retrieval timing) with a systems-level cache/prefetch layer and adaptive compression — each axis is studied alone. Almost nothing is validated on a single GPU with small open models and real local generation latency (most papers assume A100/H100 clusters).
+- The proposal: fuse three already-open-source, single-GPU-proven techniques — Predictive Prefetching's trained retrieval-timing predictor, ECoRAG/ACC-RAG's adaptive compression, and CacheBlend/CacheTune's selective KV-cache reuse — into one pipeline, and specifically cache the compressed chunk's KV states (a fusion no paper attempts).
+- Includes a literature-positioning table (mirroring the sample's Table 1) showing no existing paper checks all four boxes you'd need; an S0–S6 ablation design to prove each component's necessity; a risk register that's honest about what's infeasible to reproduce (e.g., TurboRAG/REFRAG's multi-GPU fine-tuning) rather than hand-waving it; and a realistic venue strategy (EMNLP/ACL/MLSys, with a workshop fallback).
+
+Want me to adjust anything before you send it — e.g., swap in your actual GPU specs, tighten the timeline, or add a references/citations section with full paper links?
+
+✻ Brewed for 5m 15s · done 5:43 PM
+
+※ recap: You're preparing a Q1-style research paper on reducing RAG latency; I've just finished drafting your supervisor proposal (PACER) based on the gap analysis. Next: review the docx and tell me what to adjust before you send it. (disable recaps in /config)
