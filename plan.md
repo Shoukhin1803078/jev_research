@@ -1,6 +1,8 @@
-# plan.md — DECAF: Decode-Centric, Training-Free Adaptive Context Compression for CPU-Only RAG
+# plan.md — When Does Context Compression Accelerate CPU RAG? (DECAF)
 
-Master working plan for a research paper on reducing RAG latency. This is the persistent, version-controlled plan; the supervisor-facing narrative lives in `proposals/draft/DECAF_CPU_RAG_Proposal.md`.
+Master working plan for a research paper on reducing RAG latency on CPU-only hardware. This is the persistent, version-controlled plan; the supervisor-facing narrative lives in `proposals/draft/DECAF_CPU_RAG_Proposal.md`.
+
+> **Revision note (v2).** Revised in response to `feedback.md`. The "first"/"no existing study" claims are removed (recent work: SARA ACL 2026; Perception Compressor NAACL 2025 Findings; BRIEF-Pro ACL 2026 Findings; HS-RAG IEEE 2026; CPU-only quantized-LLM benchmarks IEEE 2026). The contribution is reframed from "a new training-free adaptive compressor" to a **decode-centric characterization of when compression accelerates CPU RAG** + a CPU-aware controller + a break-even analysis + a reproducible benchmark. Three previously co-equal contributions are now hierarchically ordered (characterization + method primary; KV/prefetch transfer secondary).
 
 ---
 
@@ -10,241 +12,181 @@ Master working plan for a research paper on reducing RAG latency. This is the pe
 |---|---|
 | Compute for experiments | **CPU only — no GPU** |
 | Memory / cores | **16 GB RAM, 4–8 cores** |
-| Models | **Qwen2.5-3B-Instruct** (primary) and **Qwen2.5-7B-Instruct** (subset scaling); Qwen3-4B/8B as an alternative family |
-| Quantization | **GGUF Q4_K_M** default; Q5_K_M and Q8_0 as sweeps |
-| Runtime | **llama.cpp** (llama-cpp-python) on CPU; HuggingFace/Transformers CPU as a cross-check |
-| Training | **Fully training-free** — off-the-shelf models only; no fine-tuning, no RL |
-| Corpus | 22 downloaded papers in `papers/` (5 folders) + prior analysis in `research_gap.md` and `chat.md` |
+| Models | **Qwen2.5-3B-Instruct** (primary) and **Qwen2.5-7B-Instruct** (main benchmark + subset) |
+| Quantization | **Q4_K_M and Q8_0** core (Q5 optional, skipped initially) |
+| Runtime | **llama.cpp** (llama-cpp-python) on CPU; Transformers-CPU cross-check |
+| Training | **Fully training-free** — off-the-shelf models only |
+| Sources | 22 papers in `papers/`, prior analysis `research_gap.md`, reviewer input `feedback.md` |
 
-## 1. Thesis
+## 1. Thesis (reframed)
 
-> On CPU, **per-token decode dominates end-to-end RAG latency** (decode is memory-bandwidth-bound), and **context compression reduces it** — but every compression paper in the surveyed literature measures prefill (TTFT), or token count, or total latency, and **never isolates the decode-side (TPOT) benefit**.
+> Context compression is widely assumed to help RAG latency, but its CPU benefit is not automatic: the compressor costs CPU time, and whether it wins depends on context length, model size and quantization in a way that has not been characterized on CPU. On CPU, **decode dominates** — so the real question is **when reduction in context actually lowers CPU decoding cost enough to justify the compressor's own overhead.**
 
-DECAF delivers the first **decode-first** characterization of RAG context compression on CPU-only, quantized 3B/7B models, plus a **fully training-free adaptive** extractive compressor that closes the adaptive-rate gap that trained methods (ACC-RAG, CORE-RAG, REFRAG) leave open.
+**Primary RQ:** When does reducing retrieved context actually translate into lower CPU decoding cost, and what compression strategy maximizes answer quality per unit of CPU time?
 
 ## 2. Why this shape (GPU → CPU inversion, per folder)
 
-The existing `proposals/draft/PACER_Project_Proposal_v2.docx` targets a 24 GB RTX 4090 with vLLM/LMCache and a 3-layer predictor+compression+KV-cache fusion. The CPU-only + training-free constraints invalidate most of it:
-
-- **Folder 01 (KV-cache reuse, 8 papers):** all optimize **prefill/TTFT**, and several state the gain shrinks or vanishes when decode dominates — CacheBlend ("prefill overhead dominant … with larger batch sizes"), TurboRAG ("orthogonal to TurboRAG's prefill savings" for decode), RAGCache ("decoding iterations typically take far less time than the prefill iteration"; TPOT unaddressed), FusionRAG (prefill = 95.53% of inference time), CoinRAG (TTFT dominates given short outputs). All require vLLM / Triton / CUDA / FlashAttention. → **Not portable to CPU, and aimed at the wrong phase.**
-- **Folder 02 (prefetch/pipelining, 5 papers):** all hide **retrieval** latency behind generation. On CPU, local retrieval is ~0.1–10 ms while decode is seconds → Amdahl's law caps E2E gain at the retrieval time. VoiceAgentRAG itself: generation "dominates total latency (500–8000 ms)" and the savings are "invisible" without *fast* inference; Predictive Prefetching states benefit "scales with the ratio of decoding cost to retrieval latency"; RAGO shows retrieval <1% in long-sequence regimes. TeleRAG/HedraRAG/Predictive Prefetching are GPU-bound; RAGO is simulation-only. → **Near-zero E2E benefit on CPU honestly reported as a negative result.**
-- **Folder 03 (context compression, 4 papers):** the **only** axis that helps CPU, because shorter context shrinks the KV cache and cuts both prefill and the memory-bandwidth-bound per-token decode. **But the decode benefit is never isolated:** ACC-RAG measures FTIT/TTFT only; CORE-RAG measures token count only; ECoRAG measures total latency; REFRAG is the only one to isolate decode (TTIT) but needs **64×H100 continual pretraining** — impossible here. → **The gap DECAF fills.**
-- **Folder 04 (visual-document retrieval, 3 papers):** not CPU-viable at 3B–4B backbones (per-page VLM forward pass dominates); HPC-ColPali's "CPU-only" claim covers only Hamming search and its numbers are self-admitted *estimates*. → **Out of scope.**
-- **Training wall:** CPU-only rules out TurboRAG (SFT, 888 A100-hrs), CoinRAG (~140 GPU-hrs SFT), REFRAG (64×H100 CPT), CORE-RAG (8×H20 GRPO), ACC-RAG (LoRA compressor + RL selector, ~71 GPU-hrs). Only **ECoRAG's extractive, tiny-module skeleton (~110M scorer + 770M evaluator)** is portable to an unmodified stock Qwen, and it has a training-free variant.
+- **KV-cache reuse (8 papers):** all target prefill/TTFT; several state gains shrink when decode dominates; all need vLLM/Triton/CUDA. → not portable and aimed at the wrong phase.
+- **Prefetch/pipelining (5):** hide retrieval latency behind generation; on CPU retrieval is ms vs seconds of decode → Amdahl ≈ 0 E2E. → secondary transferability study only.
+- **Compression (4 + new literature):** the only axis that helps CPU (shrinks KV cache → cuts prefill and memory-bound decode). But the decode benefit is not isolated (ACC-RAG TTFT-only; CORE-RAG tokens-only; ECoRAG total-only; REFRAG isolates decode but needs 64×H100). New work (SARA, Perception Compressor, BRIEF-Pro) occupies training-free/adaptive compression generally, so DECAF must not claim that space.
+- **Visual (3):** not CPU-viable at 3B–4B. Out of scope.
+- **New CPU-side literature (SARA, HS-RAG, CPU quantized benchmarks):** show CPU-only RAG and training-free compression are each studied; the **interaction** with decode scaling, quantization and grounding is not.
 
 ## 3. Literature synthesis (CPU lens)
 
 ### 3.1 Positioning table
+See Table 1 of the proposal for the full matrix. Key rows: existing KV-reuse (CacheBlend, TurboRAG, RAGCache, CacheTune, FusionRAG, SpecCache, CoinRAG, PCR) — GPU, prefill/TTFT, no decode measure; prefetch (Predictive Prefetching, TeleRAG, HedraRAG, RAGO, VoiceAgentRAG) — no CPU, no decode; compression (REFRAG, CORE-RAG, ACC-RAG, ECoRAG, SARA, Perception Compressor, BRIEF-Pro) — none CPU-only with decode attribution; CPU-side (HS-RAG, IEEE quantized benchmark) — CPU but no compression/grounding interaction; grounding study (CustomNLP4U 2026) — grounding drop under compression. **DECAF = the only row combining CPU-only + training-free + adaptive + decode measured + grounding measured.**
 
-| Paper (venue) | Axis | Training-free? | Runs CPU-only? | Measures decode/TPOT? | Model scale | Hardware in paper |
-|---|---|---|---|---|---|---|
-| CacheBlend (EuroSys 2025) | KV reuse | ✓ | ✗ | ✗ (explicitly prefill-only) | 7B–70B | 2×A40 |
-| TurboRAG (EMNLP 2025) | KV reuse | ✗ (888 A100-hrs) | ✗ | ✗ ("orthogonal to decode") | 1.5B–72B | 32×A100 train / 1×A100 |
-| SpecCache (ACL 2026) | KV reuse | ✓ | ✗ | ✗ (TTFT only) | 1B–14B | 2×A100 |
-| CacheTune / AdaptiveKVCacheReuse (2026) | KV reuse | ✓ | ✗ (CPU = cache tier, not inference) | ✗ (TTFT) | 7B–32B | 2×A100 / 2×4090 |
-| FusionRAG (SIGMOD 2026) | KV reuse | ✓ | ✗ (Triton Q-Sparse-Attn) | ✗ | 7B–32B | 4×L20 |
-| RAGCache (ACM 2025 / arXiv 2024) | KV reuse | ✓ | ✗ | ✗ (notes TPOT unaddressed) | 7B–70B | A10G / 2×H800 |
-| CoinRAG (2026) | KV reuse | ✗ (~140 GPU-hrs) | ✗ | ✗ (TTFT) | 7B | RTX PRO 6000 / L40S |
-| PCR (2026) | KV reuse | ✓ | ✗ (vLLM/CUDA) | ✗ | 7B–14B | RTX 4090 + NVMe |
-| Predictive Prefetching (ICML 2026) | Prefetch | ✗ (trained predictor) | ✗ | ✗ | 8B–70B | 8×A100 |
-| TeleRAG (MLSys 2026) | Prefetch | ✓ | ✗ (SGLang/CUDA) | ✗ | 3B–22B | RTX 4090 / H100 / 8×H200 |
-| HedraRAG (SOSP 2025) | Prefetch | ✓ | ✗ (vLLM + H100) | ✗ | 8B–30B | EPYC + H100 |
-| RAGO (ISCA 2025) | Scheduling | ✓ | ✗ (simulation only) | ✗ | 1B–405B | 16–128 XPUs (sim) |
-| VoiceAgentRAG (2026) | Prefetch/cache | ✓ | partial (API LLM) | ✗ | GPT-4o-mini | API + Qdrant Cloud |
-| REFRAG (2025) | Compression | ✗ (64×H100 CPT) | ✗ | ✓ (only one; GPU) | 3B–13B | 64×H100 train / 1×A100 |
-| CORE-RAG (ICML 2026) | Compression | ✗ (8×H20 GRPO) | ✗ | ✗ (tokens only) | 1.5B→14B reader | 8×H20 |
-| ACC-RAG (EMNLP 2025 F) | Compression | ✗ (~71 h GPU) | ✗ | ✗ (FTIT/TTFT only) | 3B–7B | 1×A100 + 1×A6000 |
-| ECoRAG (ACL 2025 F) | Compression | ~ (110M+770M) | ✗ | ✗ (total latency) | reader ≥8B | 8×RTX3090 |
-| **DECAF (proposed)** | **Compression** | **✓** | **✓** | **✓ (central)** | **3B/7B GGUF** | **CPU, 16 GB** |
+### 3.2 Verified references to cite (all confirmed via search)
+- **SARA** — "Selective and Adaptive Retrieval-augmented Generation with Context Compression", ACL 2026 (2026.acl-long.661; arXiv 2507.05633).
+- **Perception Compressor** — "A Training-Free Prompt Compression Framework", NAACL 2025 Findings (2025.findings-naacl.229; arXiv 2409.19272). *Key training-free adaptive baseline.*
+- **BRIEF-Pro** — "Universal Context Compression with Short-to-Long Synthesis", ACL 2026 Findings.
+- **HS-RAG** — "A Lightweight Baseline for Efficient RAG in CPU-Constrained Environments", IEEE 2026 (11634756). CPU-only, decode over long contexts.
+- **Quantized LLM CPU benchmark** — "Performance Benchmarking of Quantized LLMs on CPU-only Systems", IEEE 2026 (11648848). CPU, 3B–7B, latency/memory.
+- **Evidence-grounding study** — "Efficiency vs. Verifiability in Evidence-Aware RAG: Does Prompt Compression Preserve Citation Grounding?", CustomNLP4U 2026 (2026.customnlp4u-1.19). 2–4% correctness drop vs 40–50% grounding drop.
 
-### 3.2 Specific, verified gaps
-
-1. **No compression paper decomposes its gain into prefill vs decode.** ACC-RAG = TTFT/FTIT only; CORE-RAG = token count only; ECoRAG = total latency only; REFRAG isolates decode (TTIT) but is GPU-trained.
-2. **No CPU-only, quantized, small-model evaluation exists** among the 22 papers — every result is A100/H100/RTX4090-scale.
-3. **Adaptive compression is always trained.** ACC-RAG's own authors call the selector "the largest bottleneck in the entire framework"; CORE-RAG uses GRPO; REFRAG uses an RL expand-policy. None is training-free.
-4. **Latency numbers are incomparable across papers** (one 4090 → 128 XPUs), and **none report CPU TPOT or peak RSS.**
-5. **Prefetch/KV-reuse transfer to a CPU decode-dominated regime is untested** and, by Amdahl, expected to fail — an honest negative-result opportunity.
-
-### 3.3 Citable survey statements (motivation)
-
-- Agentic RAG Survey §12.4: *"Multi-agent collaboration and iterative retrieval increase latency and resource consumption. Future research must explore cost-aware planning, adaptive inference, and lightweight coordination…"*
-- Agentic RAG Survey §2.4.3: retrieval/ranking named a latency driver; §9.1/Table 3 gives only qualitative Low/Moderate/High latency — no measured numbers.
-- RAG Survey §4.3 + §5.4: efficiency is a first-class axis (*"ablating caching … increases inference time up to 4×"*), yet all surveyed efficiency methods are 7B–70B+/GPT-3.5-class on unstated hardware.
+### 3.3 Safe gap wording
+Use: *"Prior work has studied CPU-only RAG deployment and context compression separately, but the interaction between context compression, CPU decode-time scaling, quantization, and end-to-end latency remains insufficiently characterized under a controlled small-model setting."* Do **not** use "first" / "no existing study" / "no compression paper".
 
 ## 4. The system: DECAF
 
-**Name:** DECAF — **D**ecode-Centric, training-free **A**daptive compression **F**or CPU-only RAG.
-
-**Pipeline**
+DECAF = **D**ecode-**C**entric **A**daptive evidence selection **F**or CPU-only RAG. Single-pass; decides **before** invoking the decoder (no iterative generation).
 
 ```
-Query
-  │
-  ▼
-Retriever (provided context, or BM25 over a small corpus)
-  │
-  ▼
-Sentence segmenter (spaCy/NLTK)
-  │
-  ▼
-Question-aware scorer — off-the-shelf cross-encoder (bge-reranker-base ~110M)
-  │
-  ▼
-Adaptive sufficiency gate (training-free; see §4.2)
-  │  add sentences until "enough evidence"
-  ▼
-Relevance reordering (mitigate lost-in-the-middle)
-  │
-  ▼
-Assemble compressed prompt
-  │
-  ▼
-Reader: Qwen2.5-3B/7B GGUF via llama.cpp (n_threads = cores)
-  │
-  ▼
-Answer + telemetry (per-stage latency, TPOT, peak RSS, achieved mem-BW)
+Query → Retrieve top-N → Sentence segmentation
+      → Fine-grained evidence scoring (relevance, coverage, uncertainty reduction)
+      → CPU-aware budget controller (estimated marginal CPU decode cost)
+      → Adaptive evidence selection (single pass) → Reordering
+      → Qwen2.5-3B/7B GGUF via llama.cpp → Answer + telemetry
 ```
 
-A separate micro-benchmark branch (llama.cpp prefix/KV cache; async retrieval thread) tests hypothesis H5.
-
-**Modules**
-
-- **4.1 Scorer** — `BAAI/bge-reranker-base` (~110M) or `bge-reranker-v2-m3` (568M), CPU via sentence-transformers / ONNX.
-- **4.2 Training-free sufficiency gate** — implement and compare three:
-  - (a) **NLI-entailment gate**: `cross-encoder/nli-deberta-v3-small` (~140M) tests whether current evidence supports a candidate answer; add until threshold.
-  - (b) **Reader self-confidence gate**: read with Qwen; add evidence if answer-token confidence / first-token entropy is poor. Zero extra model.
-  - (c) **Marginal-gain gate**: add evidence while the generated answer keeps changing.
-  - Hard cap on budget/iterations to avoid ECoRAG's worst-case loop.
-- **4.3 Reordering** — sort retained sentences by relevance.
-- **4.4 CPU telemetry + memory profiler** — per-stage timing, tokens/s, peak RSS (`resource`/psutil), achieved memory bandwidth (for the roofline fit).
-
-## 5. Theoretical framework (CPU latency model)
-
+**Core mechanism** (replaces the earlier three-gate design):
 ```
-T_total = T_retrieve + T_compress + T_prefill(L) + N_out · TPOT(L)
-
-GPU (published): T_prefill ≫ rest            (FusionRAG: prefill = 95.53%; CoinRAG: TTFT dominates)
-CPU (hypothesis): N_out · TPOT(L) ≫ T_prefill  → decode-dominated E2E
-TPOT(L) ≈ (W_model + KV(L)) / BW_mem ,        KV(L) ∝ L · d · layers · bytes   [memory-bound]
-T_prefill(L) ≈ O(L²) attention compute (fast batched GEMM) + O(L) matmuls
+Score(s_i) = [ Relevance × Coverage × UncertaintyReduction ] / EstimatedCPUCost(s_i)
+select while:  MarginalQualityGain(s_i) ≥ λ · MarginalLatencyCost(s_i)
 ```
+- `EstimatedCPUCost(s_i)` derived from the measured decode-scaling curve → makes it CPU-aware.
+- Single budget knob `λ`; decoder-free decision.
+- **Central principle:** the compressor must be cheaper than the decoding it saves (`T_compress < ΔT_decode`).
 
-Falsifiable prediction: shrinking context by factor ρ cuts TPOT by ≈ `(W + ρ·KV)/(W + KV)` and cuts E2E **more** than a prefill-only model predicts. Objective: minimize T_total s.t. quality Q ≥ Q_min; the compressor's own overhead (T_compress) must not exceed the decode savings — measured directly, not assumed.
+Components: cross-encoder scorer (`bge-reranker-base`, ~110M); CPU-aware budget controller; relevance reordering; telemetry/measurement; decoder-free grounding evaluator.
+
+## 5. Theoretical framework and measurement methodology
+
+Latency: `T_total = T_retrieve + T_compress + T_prefill(L) + N_out·TPOT(L)`.
+
+**Roofline is a hypothesis, not a law.** First-order `TPOT(L) ≈ (W + KV(L))/BW_mem`, but CPU inference is also shaped by cache hierarchy, SIMD/vectorization, quantization kernels, GQA/MQA, memory locality, NUMA, thread scheduling, BLAS choice, weight reuse, KV layout. Test empirically (E8) rather than assert.
+
+| Quantity | Definition |
+|---|---|
+| Compression efficiency | `CE = ΔT_decode / ΔL` |
+| Compression overhead | `O_c = T_compress / T_baseline` |
+| Net speedup | `S_net = T_baseline / (T_compress + T_prefill^c + T_decode^c)` |
+| Quality-adjusted efficiency | `QE = Quality / Latency` (Pareto) |
+| Break-even length | `L* = min L : T_compress + T_baseline_decode > T_decode^full` |
 
 ## 6. Research questions and hypotheses
 
-**RQs**
-- RQ1 — On CPU, is compression's E2E benefit dominated by **decode (TPOT)** rather than prefill (TTFT)?
-- RQ2 — Can a **training-free** adaptive extractive compressor match/beat fixed-ratio at equal quality?
-- RQ3 — How does quantization (Q4/Q5/Q8) interact with the latency–quality trade-off?
-- RQ4 — What is the accuracy–latency Pareto frontier of DECAF vs no-context, full-context, fixed-ratio, and token-level baselines, on 3B vs 7B?
-- RQ5 (transfer) — Do KV-cache reuse and retrieval prefetching yield measurable E2E gains on CPU?
+**RQs (4):**
+1. How does retrieved-context length affect TTFT, TPOT and E2E latency in CPU-only quantized RAG?
+2. When does compression produce **net** savings after overhead (what is `L*`)?
+3. Can a training-free CPU-aware compressor beat fixed-ratio and existing prompt compression on the quality–latency–grounding Pareto?
+4. How do model size and quantization alter the compression–quality–latency relationship?
 
-**Hypotheses**
-- H1 — Compression's E2E gain is predominantly TPOT-driven (prefill share < decode share), reversing GPU prefill-dominance.
-- H2 — A training-free adaptive gate matches/beats fixed-ratio at equal EM/F1 with fewer tokens.
-- H3 — The accuracy–latency Pareto is steeper on CPU than the GPU literature implies (TPOT is memory-bound and L-sensitive).
-- H4 — Off-the-shelf reranker + a training-free gate recovers most of ECoRAG's trained-module benefit at zero training.
-- H5 (negative) — KV-reuse and prefetch provide ≈0 net E2E benefit on CPU; reuse moves only TTFT, prefetch costs more than it hides.
+KV-reuse/prefetch = **secondary analysis**, not an RQ.
+
+**Hypotheses:**
+- H1: As context length grows, decode's share of E2E CPU latency grows, and compression gives larger relative gains in TPOT than TTFT.
+- H2: For each (model, quant) there is a break-even `L*` (net loss below, net win above).
+- H3: A single-pass CPU-aware gate matches/beats fixed-ratio and Perception Compressor on the quality–latency–grounding Pareto.
+- H4: Model size and quantization shift `L*` and the frontier.
+- H5 (secondary): KV-reuse/prefetch give limited net E2E benefit when CPU decode dominates.
 
 ## 7. Experimental plan
 
-### 7.1 Datasets
-Four standard RAG QA benchmarks, chosen to match the exact datasets the compression baselines use (ECoRAG, ACC-RAG, CORE-RAG) so accuracy is directly comparable:
-
-| Dataset | QA type | Context provided? | Baselines reporting it |
-|---|---|---|---|
-| HotpotQA (distractor) | Multi-hop | Yes (gold paragraphs) | CacheBlend, ECoRAG, ACC-RAG |
-| 2WikiMultihopQA | Multi-hop | Yes | CacheBlend, ECoRAG |
-| Natural Questions (NQ) | Single-hop | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
-| TriviaQA | Single-hop | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
-
-- Retrieval modes: (1) **provided-context** (isolates compression; all S0–S8 run here); (2) **small `rank_bm25` index** over the datasets' own passages for end-to-end runs + the fewer-docs baseline.
-- Excluded: the full 21M-passage DPR Wikipedia corpus — it would make retrieval, not prefill/decode, the dominant cost and confound H1.
-- Scale: ~200–300 eval queries/dataset + 50 calibration queries (threshold selection only; no training anywhere). 3B on all four; 7B on a subset.
-- Protocol: dataset-native fixed prompt, standard EM/F1 scoring, identical across configs.
+### 7.1 Datasets (depth > breadth)
+- Main: **HotpotQA (distractor)** and **2WikiMultihopQA** — ~**500 queries each**.
+- Generalization: **long-context benchmark** (LongBench multi-doc QA; MuSiQue/NarrativeQA alternates) and **TriviaQA or NQ** — ~**200 queries each**.
+- 50 calibration queries per model/quant (threshold selection only; no training). 3B on all; 7B on main + subset.
+- Retrieval modes: provided-context (core) + small BM25/dense index (end-to-end baselines). Exclude full 21M DPR corpus.
+- **New (feedback):** at least one long-context set is mandatory to measure `L*`; short contexts do not stress the phenomenon.
 
 ### 7.2 Setup
-- Hardware: fixed CPU (record model, cores, RAM, thread count), 16 GB.
-- Models: Qwen2.5-3B-Instruct (all runs) + Qwen2.5-7B-Instruct (subset). GGUF Q4_K_M default; Q5_K_M/Q8_0 sweeps.
-- Runtime: llama.cpp (llama-cpp-python), `n_threads` = physical cores; Transformers-CPU cross-check.
+- Hardware: fixed CPU (record model, cores, RAM, threads), 16 GB.
+- Models: Qwen2.5-3B-Instruct (all) + Qwen2.5-7B-Instruct (main + subset). **Quant: Q4_K_M + Q8_0** (Q5 optional).
+- Runtime: llama.cpp (llama-cpp-python), `n_threads` = physical cores.
 
 ### 7.3 Baselines
-- No-context (parametric only).
-- Full-context RAG.
-- Fixed top-k sentences (k ∈ {1,2,4,8}).
-- LLMLingua-2 token-level compression (rate sweep; training-free, XLM-R).
-- ECoRAG training-free variant (off-the-shelf scorer + threshold).
-- Fewer-retrieved-docs.
-All re-run on identical CPU hardware.
+- Retrieval: BM25 top-k; dense top-k; hybrid.
+- Compression/selection: full context; fixed top-k; LLMLingua-2; **Perception Compressor** (training-free adaptive); DECAF. ACC-RAG/ECoRAG as reference points where compute permits.
+- All on identical CPU hardware/datasets/metrics. GPU-trained (TurboRAG/REFRAG/CORE-RAG/CoinRAG) cited qualitatively with compute barrier stated.
 
 ### 7.4 Metrics
-- Latency: TTFT, **TPOT (ms/token)**, E2E, P50/P95, tokens/s.
-- System: peak RSS, compression ratio, compressor overhead as % of E2E, achieved memory BW.
-- Quality: EM, F1 (QA); ROUGE-L where applicable.
-- Composite: accuracy-per-second; Pareto frontier.
+Latency: TTFT, **TPOT**, E2E, P50/P95, tokens/s. System: peak RSS, compression ratio, `O_c`, achieved memory BW, CPU utilization, energy (RAPL/powerstat where available). Quality: EM, F1, ROUGE-L. **Grounding (new): evidence recall/precision, answer-support rate, citation correctness.** Derived: CE, O_c, S_net, QE, `L*`. Composite: accuracy–latency Pareto.
 
-### 7.5 Ablation matrix (S0–S8)
-| Config | Components |
-|---|---|
-| S0 | No context |
-| S1 | Full context |
-| S2 | Fixed top-k |
-| S3 | ECoRAG training-free |
-| S4 | S3 + adaptive gate |
-| S5 | S4 + reranker scoring |
-| S6 | S5 + reordering |
-| S7 | Token-level (LLMLingua-2) |
-| S8 | Full DECAF |
+### 7.5 Experiments (E1–E9; trimmed ~25–30%)
+| ID | Experiment | Tests |
+|---|---|---|
+| E1 | Context-length scaling L∈{1K,2K,4K,8K,16K,32K}, full vs compressed | RQ1/H1 |
+| E2 | Compression ratio (0.8/0.6/0.4/0.2) vs quality | RQ3 |
+| E3 | Compressor overhead vs decode savings (`O_c`,`S_net`) | RQ2 |
+| E4 | **Break-even `L*`** per model×quant | RQ2/H2 |
+| E5 | Quantization interaction (Q4_K_M vs Q8_0) | RQ4 |
+| E6 | Model-size interaction (3B vs 7B) | RQ4 |
+| E7 | **Grounding preservation** under compression | RQ3 |
+| E8 | CPU memory-bandwidth / roofline analysis | §5 |
+| E9 | Generalization dataset | RQ3 |
 
-Cross-sweeps: 3B vs 7B; quant Q4/Q5/Q8; context length L ∈ {512, 1K, 2K, 4K}; gate variant (a/b/c). S8 vs S2 isolates H2; the L-sweep + TTFT/TPOT split isolates H1.
+### 7.6 Component analysis
+Scorer off/on; CPU-aware cost term on/off (relevance-only); coverage term on/off; reordering on/off; `λ` sweep — quantify what CPU-awareness adds over plain relevance top-k.
 
-### 7.6 CPU transfer micro-study (H5)
-Measure (i) llama.cpp prefix/KV cache on repeated queries and (ii) async retrieval prefetch overlapped with decode. Report net E2E + TTFT; test whether reuse only moves TTFT and whether prefetch costs more than it hides.
+### 7.7 Secondary analysis: KV-reuse & prefetch transferability (H5)
+llama.cpp prefix/KV cache + async prefetch overlapped with decode; report net E2E and TTFT; secondary, not headline.
 
-### 7.7 Statistical plan
-Paired bootstrap over queries (95% CI + effect sizes) for latency; paired Wilcoxon for EM/F1; Holm–Bonferroni across the S0–S8 family; Pareto frontiers rather than single numbers; report compressor overhead so complexity is justified.
+### 7.8 Statistical plan
+Latency: paired bootstrap CI + median + P95 + effect size. Accuracy (exact-answer): McNemar. Continuous accuracy/grounding: permutation/paired bootstrap. Holm–Bonferroni across the core family. Report absolute + relative; Pareto is the primary story, not significance.
 
 ## 8. Risks and mitigations
 | Risk | Mitigation |
 |---|---|
-| Compressor CPU cost dominates | ~110M reranker; measure overhead; prefer the (free) reader-confidence gate |
-| 7B too slow on 4–8 cores | 3B primary; 7B on a subset only |
-| Adaptive gate loops | Hard budget/iteration cap |
-| Quality floor unmet at high compression | Report Pareto, not a single operating point |
-| Dataset scale vs CPU throughput | Small eval sets, fixed seeds, parallelize across cores |
-| Off-the-shelf scorer ≠ ECoRAG's trained scorer | Position as the *quantified cost of training-free* |
+| Compressor cost erases gains | Single-pass decoder-free ~110M scorer; report `O_c` as a first-class result |
+| Adaptive gate instability/expense | One gate + one knob `λ`; no iterative generation |
+| 7B too slow on 4–8 cores | 3B primary; 7B main + subset |
+| 32K points slow on CPU | High-`L` points on a small subset sufficient to fit `TPOT(L)` |
+| No native grounding gold | Score against retained gold/supporting evidence |
+| Roofline over-simplified | Treat as hypothesis; validate against measured bandwidth/cache/utilization |
+| Novelty overlap (SARA/Perception Compressor/BRIEF-Pro) | Position as CPU decode-centric characterization + break-even, not "first training-free adaptive" |
 
-## 9. Timeline (indicative phases)
-1. CPU harness + telemetry — (T_retrieve, T_compress, TTFT, TPOT, E2E, RSS, mem-BW).
-2. Baselines + fixed-ratio/k sweep.
-3. Training-free modules + gate variants.
-4. S0–S8 ablation + 3B/7B + quant sweeps.
-5. Transfer micro-study + roofline fit.
-6. Writing + reproducibility artifacts.
+## 9. Timeline
+1. Harness + telemetry + methodology (3 w) → 2. E1 + E8 characterization (4 w) → 3. Baselines incl. Perception Compressor (3–4 w) → 4. DECAF (scorer + controller + reordering + grounding) (4 w) → 5. E2–E7, E9, `L*`, Pareto, component analysis (4–5 w) → 6. Secondary + writing (4 w).
 
-## 10. Publication strategy
-Position as an **efficiency/NLP** contribution (not data-center systems): ACL/EMNLP (efficiency/retrieval), Findings, NAACL; on-device/efficient-NLP workshops (ENLSP, SustaiNLP) as fallback. Novelty = decode-first CPU characterization + a training-free adaptive compressor + an honest transfer study — not a new primitive.
+## 10. Publication strategy (venue decided)
+First version targeted at **efficient-NLP** (ACL/EMNLP efficiency/retrieval, main or Findings; NAACL), with methodology strong enough that systems reviewers respect it; **MLSys / EuroSys / ASPLOS / USENIX ATC** as alternative home if the characterization warrants a systems framing. Decide now, because the two framings imply different lead contributions.
 
 ## 11. Repo deliverables and layout
 | File | Status | Purpose |
 |---|---|---|
 | `plan.md` | this file | master working plan |
-| `proposals/draft/DECAF_CPU_RAG_Proposal.md` | to create | supervisor-facing proposal (20-section spine) |
+| `proposals/draft/DECAF_CPU_RAG_Proposal.md` | updated | supervisor-facing proposal (24-section spine) |
 | `research_gap.md` | existing | per-paper gap analysis (GPU-era assumptions) |
+| `feedback.md` | existing | reviewer feedback driving v2 |
 | `papers/` | existing | 22 source PDFs |
 
-## 12. Verification checklist
-1. Every factual claim traces to a paper's actual number/quote (FusionRAG 95.53%; ACC-RAG "largest bottleneck" + FTIT only; ECoRAG 110M+770M + total-latency only; CORE-RAG tokens only; REFRAG 64×H100 + TTIT; VoiceAgentRAG "generation dominates"; survey §12.4/§4.3).
-2. Central gap claim is internally consistent: ACC-RAG (TTFT), CORE-RAG (tokens), ECoRAG (total) do not isolate decode; only REFRAG does, and it is GPU-trained.
-3. Every proposed component is CPU-runnable and training-free (llama.cpp GGUF; ~110–570M reranker; optional ~140M NLI; no first-party training).
-4. Hardware assumptions stated and consistent: 16 GB / 4–8 cores, Qwen2.5-3B primary + 7B subset, Q4_K_M default.
-5. Proposed system makes falsifiable predictions (H1–H5) and pre-commits to reporting the negative result (H5).
-6. No code is written for this task — planning/proposal documents only.
+## 12. Verification checklist (v2)
+1. No "first"/"no existing study"/"no compression paper" claims remain — replaced by "insufficiently characterized".
+2. New literature cited and verified: SARA (ACL 2026), Perception Compressor (NAACL 2025 F), BRIEF-Pro (ACL 2026 F), HS-RAG (IEEE 2026), CPU quantized benchmark (IEEE 2026), grounding study (CustomNLP4U 2026).
+3. Contribution hierarchy: characterization + CPU-aware method primary; KV/prefetch transfer secondary (not RQ5).
+4. Roofline presented as a hypothesis with microarchitectural qualifications; E8 tests it empirically.
+5. Measurement framework (CE, O_c, S_net, QE, `L*`) defined; break-even is a first-class experiment.
+6. Single-pass CPU-aware controller replaces the three-gate design; `T_compress < ΔT_decode` stated as central principle.
+7. Datasets add a long-context benchmark; depth > breadth (500×2 main, 200×2 generalization); quant Q4_K_M+Q8_0.
+8. Metrics add **grounding** and **energy**; baselines add Perception Compressor + retrieval baselines.
+9. Experiments trimmed to E1–E9; stats use McNemar/permutation + absolute & relative.
+10. Venue framing decided explicitly.
 
 ## 13. Immediate next steps
-1. Confirm exact CPU model/cores/RAM and llama.cpp build with the supervisor.
-2. Fix the dataset subsets + held-out split and the 3B/7B checkpoint hashes.
-3. Build the CPU harness + telemetry, then reproduce the S0–S2 baselines.
-4. Implement the training-free gate variants and pick the default (a/b/c).
-5. Run S0–S8 + 3B/7B + quant sweeps, then the transfer micro-study, then fit the roofline model.
+1. Confirm CPU/cores/RAM + llama.cpp build.
+2. Fix dataset subsets/splits (incl. the long-context set) and model hashes.
+3. Build harness + measurement methodology (E1, E8).
+4. Implement the single-pass CPU-aware controller.
+5. Run E2–E7, E9 and the secondary transferability analysis.
