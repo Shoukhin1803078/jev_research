@@ -183,6 +183,7 @@ Datasets are chosen to stress the central phenomenon (context length → CPU dec
 # 11. Proposed System Architecture
 
 DECAF makes the compression decision **before** invoking the decoder — there is no iterative generation, which is what keeps `T_compress` small.
+<img width="1536" height="582" alt="Untitled - Visual 1" src="https://github.com/user-attachments/assets/6efbdb78-0e7c-4e78-a733-27d85128fc68" />
 
 ```
 Query
