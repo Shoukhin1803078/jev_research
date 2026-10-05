@@ -18,7 +18,7 @@ AI / ML & Systems-for-ML Research
 
 # Document Roadmap
 
-This proposal is organized into twenty-one sections spanning motivation, literature positioning, theoretical framing, system design, experimental protocol, evaluation, risk management and publication planning. Sections 1–6 establish the problem, the literature gap and the research questions; Sections 7–10 specify the proposed framework and its technical modules; Sections 11–18 specify the experimental protocol, baselines, ablations, transfer study and statistical plan; Sections 19–21 address reproducibility, timeline, publication strategy and conclusion.
+This proposal is organized into twenty-two sections spanning motivation, literature positioning, theoretical framing, scope, datasets, system design, experimental protocol, evaluation, risk management and publication planning. Sections 1–8 establish the problem, the literature gap, the research questions and the scope; Section 9 specifies the evaluation datasets; Sections 10–11 specify the proposed framework and its technical modules; Sections 12–19 specify the baseline suite, experimental protocol, metrics, ablations, transfer study and statistical plan; Sections 20–22 address reproducibility, timeline, publication strategy and conclusion.
 
 ---
 
@@ -147,9 +147,35 @@ The central falsifiable prediction: because CPU decode is memory-bound, shrinkin
 
 ---
 
-# 9. Proposed System Architecture
+# 9. Evaluation Datasets
 
-The pipeline is organized so that segmentation, scoring, gating and reordering can each be benchmarked independently before composition (mirroring the ablation in §14).
+DECAF is evaluated on four standard RAG QA benchmarks, chosen because they are the exact datasets used by the compression baselines it extends (ECoRAG, ACC-RAG, CORE-RAG) — so accuracy results are directly comparable rather than merely plausible.
+
+***Table 2. Evaluation datasets***
+
+| Dataset | QA type | Role / why chosen | Context provided? | Baselines reporting it |
+|---|---|---|---|---|
+| HotpotQA (distractor) | Multi-hop | Primary multi-hop benchmark; gold paragraph sets let compression be isolated from retrieval error | Yes (10 gold paragraphs / query) | CacheBlend, ECoRAG, ACC-RAG |
+| 2WikiMultihopQA | Multi-hop | Second multi-hop set; stresses cross-chunk reasoning where compression is most likely to hurt | Yes | CacheBlend, ECoRAG |
+| Natural Questions (NQ) | Single-hop | The single most comparable axis across the compression literature | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
+| TriviaQA | Single-hop | Second single-hop set, for robustness of the compression / quality findings | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
+
+**Two retrieval modes.**
+
+- **Provided-context mode** (HotpotQA distractor paragraphs; 2WikiMQA and TriviaQA wiki contexts) — retrieval is held fixed and cheap, so the experiment isolates *compression* from *retrieval error*. All core S0–S8 ablations run here.
+- **Small BM25 index mode** (`rank_bm25` over a modest Wikipedia subset built from the datasets' own passages) — for end-to-end runs and the "fewer-retrieved-docs" retrieval-side baseline.
+
+**Deliberate exclusion.** The full 21M-passage DPR Wikipedia corpus is **not** used: indexing and searching it would make retrieval — not prefill/decode — the dominant cost, which is the wrong regime for a compression-focused CPU study and would confound the H1 measurement.
+
+**Scale (sized to CPU throughput).** CPU decoding is slow, so full test sets are infeasible. Each dataset uses **~200–300 evaluation queries** plus **50 held-out calibration queries** for gate thresholds, with a fixed seed. No training is used anywhere (all methods are training-free), so the calibration split is for threshold selection only. The 3B model runs across all four datasets; the 7B model runs on a reduced subset for the scaling comparison. Exact query IDs and split files are released (§20).
+
+**Prompt and scoring protocol.** Dataset-native prompts are used with one fixed template; answers are scored with the dataset's standard EM/F1 script. Any answer-format or chain-of-thought instructions are held identical across all configurations, so the compression configuration is the only variable that changes.
+
+---
+
+# 10. Proposed System Architecture
+
+The pipeline is organized so that segmentation, scoring, gating and reordering can each be benchmarked independently before composition (mirroring the ablation in §15).
 
 ```
 Query
@@ -183,7 +209,7 @@ A separate micro-benchmark branch measures llama.cpp prefix/KV cache and an asyn
 
 **Safety/validity boundary:** the compressor may only change *which* retrieved sentences reach the decoder and *when* they are fetched; it never alters sentence content beyond selection. Every decision is logged (retained count, compression ratio, per-stage latency) so answer quality can be attributed back to a specific operating point for failure analysis.
 
-***Table 2. Core modules and research value***
+***Table 3. Core modules and research value***
 
 | Module | Function | Baseline it extends |
 |---|---|---|
@@ -195,26 +221,26 @@ A separate micro-benchmark branch measures llama.cpp prefix/KV cache and an asyn
 
 ---
 
-# 10. Core Technical Modules
+# 11. Core Technical Modules
 
-**10.1 Scorer.** Sentence-level, question-aware scoring with an off-the-shelf cross-encoder — `BAAI/bge-reranker-base` (~110M) by default, `bge-reranker-v2-m3` (568M) as a quality variant — run on CPU via sentence-transformers or ONNX. This replaces ECoRAG's trained dual-encoder and is the quantified "cost of training-free."
+**11.1 Scorer.** Sentence-level, question-aware scoring with an off-the-shelf cross-encoder — `BAAI/bge-reranker-base` (~110M) by default, `bge-reranker-v2-m3` (568M) as a quality variant — run on CPU via sentence-transformers or ONNX. This replaces ECoRAG's trained dual-encoder and is the quantified "cost of training-free."
 
-**10.2 Training-free sufficiency gate (the core novel mechanism).** Three training-free gate designs are implemented and compared:
+**11.2 Training-free sufficiency gate (the core novel mechanism).** Three training-free gate designs are implemented and compared:
 - **(a) NLI-entailment gate:** a small NLI cross-encoder (`cross-encoder/nli-deberta-v3-small`, ~140M) tests whether the currently retained evidence supports a candidate answer; sentences are added until a confidence threshold is met.
 - **(b) Reader self-confidence gate:** the reader (Qwen) answers with the current evidence; if answer-token confidence or first-token entropy is poor, more evidence is added. Uses the reader itself, adding zero extra models.
 - **(c) Marginal-gain gate:** evidence is added while the generated answer keeps changing.
 
 All gates carry a hard retention/iteration cap to avoid ECoRAG's acknowledged worst-case reflection loop.
 
-**10.3 Relevance reordering.** Retained sentences are ordered by relevance score to reduce lost-in-the-middle behavior on small models.
+**11.3 Relevance reordering.** Retained sentences are ordered by relevance score to reduce lost-in-the-middle behavior on small models.
 
-**10.4 CPU telemetry and memory profiler.** Logs T_retrieve, T_compress, TTFT, TPOT, end-to-end latency, tokens/s, peak RSS (`resource.getrusage` / psutil), and an achieved-memory-bandwidth estimate used to fit the roofline model of §4.
+**11.4 CPU telemetry and memory profiler.** Logs T_retrieve, T_compress, TTFT, TPOT, end-to-end latency, tokens/s, peak RSS (`resource.getrusage` / psutil), and an achieved-memory-bandwidth estimate used to fit the roofline model of §4.
 
-**10.5 Baselines and diagnostics.** Fixed top-k extraction; LLMLingua-2 token-level compression (training-free, XLM-R); the ECoRAG training-free variant; and the llama.cpp prefix/KV-cache + async-prefetch micro-benchmarks.
+**11.5 Baselines and diagnostics.** Fixed top-k extraction; LLMLingua-2 token-level compression (training-free, XLM-R); the ECoRAG training-free variant; and the llama.cpp prefix/KV-cache + async-prefetch micro-benchmarks.
 
 ---
 
-# 11. Baselines
+# 12. Baselines
 
 - **No-context** (parametric-only answer from the target model).
 - **Full-context RAG** (all retrieved context, no compression).
@@ -222,27 +248,27 @@ All gates carry a hard retention/iteration cap to avoid ECoRAG's acknowledged wo
 - **LLMLingua-2** token-level compression (rate sweep; training-free).
 - **ECoRAG training-free variant** (off-the-shelf scorer + threshold gate).
 - **Fewer-retrieved-docs** (retrieval-side compression).
-- **DECAF (full)** — §9/§10.
+- **DECAF (full)** — §10/§11.
 
 All baselines are re-run on identical CPU hardware, datasets and metrics — directly resolving the cross-paper incomparability noted in §3.1 (gap 2). Methods requiring GPU training (TurboRAG, REFRAG, CORE-RAG, CoinRAG) are cited qualitatively with their compute barrier stated explicitly rather than approximated at reduced fidelity.
 
 ---
 
-# 12. Experimental Methodology
+# 13. Experimental Methodology
 
 1. Fix the CPU hardware (model, cores, RAM, thread count), the model checkpoints (Qwen2.5-3B/7B) and their GGUF quantizations/hashes, prompt templates, retrieval setup and random seeds before development begins.
 2. Build the CPU harness and telemetry; validate it against a manual timing baseline.
 3. Reproduce the fixed-ratio, token-level and ECoRAG-training-free baselines.
 4. Implement the training-free modules and the three gate variants; select a default from the comparison.
-5. Run the S0–S8 ablation (§14) and the 3B-vs-7B, quantization and context-length sweeps.
-6. Run the CPU transfer micro-study (§15) and fit the roofline model (§4).
-7. Finalize statistical reporting (§18) and the failure analysis.
+5. Run the S0–S8 ablation (§15) and the 3B-vs-7B, quantization and context-length sweeps.
+6. Run the CPU transfer micro-study (§16) and fit the roofline model (§4).
+7. Finalize statistical reporting (§19) and the failure analysis.
 
 Eval sets are sized to CPU throughput (~200–300 queries per dataset, with 50 calibration queries); each configuration runs a warmup, then ≥3 repeats per query, reporting medians with confidence intervals. Every stage is logged.
 
 ---
 
-# 13. Evaluation Metrics
+# 14. Evaluation Metrics
 
 - **Latency:** time-to-first-token (TTFT), **time-per-output-token (TPOT, ms/token)**, end-to-end latency, P50/P95 tail latency, tokens/second.
 - **System:** peak RSS, compression ratio (retained / available tokens), compressor overhead as a fraction of end-to-end latency, achieved memory bandwidth.
@@ -251,9 +277,9 @@ Eval sets are sized to CPU throughput (~200–300 queries per dataset, with 50 c
 
 ---
 
-# 14. Component-Necessity (Ablation) Study
+# 15. Component-Necessity (Ablation) Study
 
-***Table 3. Ablation configurations***
+***Table 4. Ablation configurations***
 
 | Config | Components included |
 |---|---|
@@ -271,15 +297,15 @@ S8 vs S2 isolates H2 (training-free adaptive vs fixed ratio); the context-length
 
 ---
 
-# 15. CPU Transfer Micro-Study (H5)
+# 16. CPU Transfer Micro-Study (H5)
 
 A focused micro-benchmark measures (i) llama.cpp prefix/KV cache across repeated queries and (ii) an asynchronous retrieval prefetch overlapped with decoding. It reports net end-to-end latency and TTFT, testing whether KV reuse only shifts TTFT and whether prefetch cost exceeds the retrieval latency it hides. This is the proposal's deliberate **negative-result** contribution: it directly tests whether the GPU-era KV-reuse and prefetch techniques transfer to a CPU decode-dominated regime, a question no surveyed paper answers.
 
 ---
 
-# 16. Risk Register
+# 17. Risk Register
 
-***Table 4. Risks and mitigations***
+***Table 5. Risks and mitigations***
 
 | Risk | Mitigation |
 |---|---|
@@ -293,7 +319,7 @@ A focused micro-benchmark measures (i) llama.cpp prefix/KV cache across repeated
 
 ---
 
-# 17. Success Criteria
+# 18. Success Criteria
 
 1. All baselines run on identical CPU hardware with a consistent metric set, resolving cross-paper incomparability.
 2. **H1** is confirmed or refuted with an explicit TTFT-vs-decode share of the compression gain.
@@ -304,13 +330,13 @@ A focused micro-benchmark measures (i) llama.cpp prefix/KV cache across repeated
 
 ---
 
-# 18. Statistical Analysis Plan
+# 19. Statistical Analysis Plan
 
 Latency comparisons across configurations and baselines use paired bootstrap resampling (matched per query), reported with 95% confidence intervals and effect sizes rather than point estimates. Quality metrics (EM/F1) use paired Wilcoxon signed-rank tests. Holm–Bonferroni correction controls family-wise error across the S0–S8 comparisons. Latency–quality trade-offs are reported as Pareto frontiers, and compressor overhead is reported alongside every speedup so that added complexity is justified by measured benefit.
 
 ---
 
-# 19. Reproducibility Plan
+# 20. Reproducibility Plan
 
 - Public release of the compressor, gate, scoring and telemetry code, built on open CPU tooling (llama.cpp / llama-cpp-python, sentence-transformers/ONNX, spaCy/NLTK).
 - Exact hardware specification: CPU model, physical cores, RAM, thread count; software: OS, llama.cpp build, library versions.
@@ -321,9 +347,9 @@ Latency comparisons across configurations and baselines use paired bootstrap res
 
 ---
 
-# 20. Timeline and Collaboration Roles
+# 21. Timeline and Collaboration Roles
 
-***Table 5. Indicative phased timeline***
+***Table 6. Indicative phased timeline***
 
 | Phase | Activities | Indicative duration |
 |---|---|---|
@@ -334,7 +360,7 @@ Latency comparisons across configurations and baselines use paired bootstrap res
 | 5. Transfer + model | KV-reuse/prefetch micro-study; roofline fit | 2–3 weeks |
 | 6. Writing | Manuscript, failure analysis, reproducibility artifacts | 3–4 weeks |
 
-***Table 6. Collaboration roles***
+***Table 7. Collaboration roles***
 
 | Area | Primary responsibility |
 |---|---|
@@ -347,7 +373,7 @@ Latency comparisons across configurations and baselines use paired bootstrap res
 
 ---
 
-# 21. Publication Strategy and Conclusion
+# 22. Publication Strategy and Conclusion
 
 Target venues fit an **efficiency/NLP** contribution rather than a data-center systems one: ACL/EMNLP (efficiency/retrieval tracks, main or Findings), NAACL, and on-device/efficient-NLP workshops (e.g. ENLSP, SustaiNLP) as a lower-risk fallback. This scope matches the venue tier at which directly comparable single-technique work appears (TurboRAG at EMNLP 2025, SpecCache at ACL 2026, ACC-RAG and ECoRAG at EMNLP/ACL 2025 Findings).
 

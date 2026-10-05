@@ -149,13 +149,27 @@ Falsifiable prediction: shrinking context by factor ρ cuts TPOT by ≈ `(W + ρ
 
 ## 7. Experimental plan
 
-### 7.1 Setup
+### 7.1 Datasets
+Four standard RAG QA benchmarks, chosen to match the exact datasets the compression baselines use (ECoRAG, ACC-RAG, CORE-RAG) so accuracy is directly comparable:
+
+| Dataset | QA type | Context provided? | Baselines reporting it |
+|---|---|---|---|
+| HotpotQA (distractor) | Multi-hop | Yes (gold paragraphs) | CacheBlend, ECoRAG, ACC-RAG |
+| 2WikiMultihopQA | Multi-hop | Yes | CacheBlend, ECoRAG |
+| Natural Questions (NQ) | Single-hop | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
+| TriviaQA | Single-hop | Optional (small BM25 index) | ECoRAG, CORE-RAG, ACC-RAG |
+
+- Retrieval modes: (1) **provided-context** (isolates compression; all S0–S8 run here); (2) **small `rank_bm25` index** over the datasets' own passages for end-to-end runs + the fewer-docs baseline.
+- Excluded: the full 21M-passage DPR Wikipedia corpus — it would make retrieval, not prefill/decode, the dominant cost and confound H1.
+- Scale: ~200–300 eval queries/dataset + 50 calibration queries (threshold selection only; no training anywhere). 3B on all four; 7B on a subset.
+- Protocol: dataset-native fixed prompt, standard EM/F1 scoring, identical across configs.
+
+### 7.2 Setup
 - Hardware: fixed CPU (record model, cores, RAM, thread count), 16 GB.
 - Models: Qwen2.5-3B-Instruct (all runs) + Qwen2.5-7B-Instruct (subset). GGUF Q4_K_M default; Q5_K_M/Q8_0 sweeps.
 - Runtime: llama.cpp (llama-cpp-python), `n_threads` = physical cores; Transformers-CPU cross-check.
-- Datasets: HotpotQA (distractor), 2WikiMultihopQA, Natural Questions, TriviaQA. Eval sets ~200–300 queries/dataset (50 calibration), sized to CPU throughput; provided-context settings isolate compression, plus a BM25 index for end-to-end.
 
-### 7.2 Baselines
+### 7.3 Baselines
 - No-context (parametric only).
 - Full-context RAG.
 - Fixed top-k sentences (k ∈ {1,2,4,8}).
@@ -164,13 +178,13 @@ Falsifiable prediction: shrinking context by factor ρ cuts TPOT by ≈ `(W + ρ
 - Fewer-retrieved-docs.
 All re-run on identical CPU hardware.
 
-### 7.3 Metrics
+### 7.4 Metrics
 - Latency: TTFT, **TPOT (ms/token)**, E2E, P50/P95, tokens/s.
 - System: peak RSS, compression ratio, compressor overhead as % of E2E, achieved memory BW.
 - Quality: EM, F1 (QA); ROUGE-L where applicable.
 - Composite: accuracy-per-second; Pareto frontier.
 
-### 7.4 Ablation matrix (S0–S8)
+### 7.5 Ablation matrix (S0–S8)
 | Config | Components |
 |---|---|
 | S0 | No context |
@@ -185,10 +199,10 @@ All re-run on identical CPU hardware.
 
 Cross-sweeps: 3B vs 7B; quant Q4/Q5/Q8; context length L ∈ {512, 1K, 2K, 4K}; gate variant (a/b/c). S8 vs S2 isolates H2; the L-sweep + TTFT/TPOT split isolates H1.
 
-### 7.5 CPU transfer micro-study (H5)
+### 7.6 CPU transfer micro-study (H5)
 Measure (i) llama.cpp prefix/KV cache on repeated queries and (ii) async retrieval prefetch overlapped with decode. Report net E2E + TTFT; test whether reuse only moves TTFT and whether prefetch costs more than it hides.
 
-### 7.6 Statistical plan
+### 7.7 Statistical plan
 Paired bootstrap over queries (95% CI + effect sizes) for latency; paired Wilcoxon for EM/F1; Holm–Bonferroni across the S0–S8 family; Pareto frontiers rather than single numbers; report compressor overhead so complexity is justified.
 
 ## 8. Risks and mitigations
